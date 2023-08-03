@@ -18,53 +18,143 @@ import cv2
 import numpy as np
 from collections import Counter
 from scipy.spatial import distance
+from urllib.parse import urlparse
+import pytesseract
+
+
 #create the app
 app = FastAPI()
 
-modelV8s = YOLO('/code/app/best_v8s.pt')
+# 모델 호출!!!!!!
+# modelV8s = YOLO('/code/app/best_v8s.pt')
 modelV8m = YOLO('/code/app/best_v8m.pt')
-model = modelV8m
+model = modelV8m;
 
 model3 = YOLO('/code/app/step3_last.pt')
 
 # step3 현재 사용되는 클래스 ( 임시 )
-step3_cls_names = {
-    0: 'typo_text',
-    1: 'typo_price_num',
-    2: 'typo_price_dollar',
-    3: 'typo_price_W',
-    4: 'typo_price_won_en',
-    5: 'typo_price_won_kr',
-    6: 'image_photo',
-    7: 'image_colorBG', #교체
-    8: 'image_removeBG',
-    9: 'icon_arrow_left',
-    10: 'icon_arrow_top',
-    11: 'icon_arrow_bottom', #추가
-    12: 'icon_arrow_right',
-    13: 'icon_video_play', #추가
-    14: 'icon_SNS_insta',
-    15: 'icon_SNS_youtube',
-    16: 'btn_radius',
-    17: 'btn_ellipse',
-    18: 'btn_square'
-}
+step3_cls_names = {		
+                0: '',		
+                1: 'typo_price_num',		
+                2: 'typo_price_dollar',		
+                3: 'typo_price_W',		
+                4: 'typo_price_won_en',		
+                5: 'typo_price_won_kr',		
+                6: 'image_photo',		
+                7: 'image_colorBG', #교체		
+                8: 'image_removeBG',		
+                9: 'icon_arrow_left',		
+                10: 'icon_arrow_top',		
+                11: 'icon_arrow_bottom', #추가		 
+                12: 'icon_arrow_right',		
+                13: 'icon_video_play', #추가		
+                14: 'icon_SNS_insta',		
+                15: 'icon_SNS_youtube',		
+                16: 'btn_radius',		
+                17: 'btn_ellipse',		
+                18: 'btn_square',
+                19: 'typo_text'		
+                }		
 
-
-
+def getFilterAndSortDataList(dict_array):
+    # minY 기준으로 오름차순 정렬
+    sorted_array = sorted(dict_array, key=lambda x: x['minY'])
     
-def getModelResult( results ):
+    headerItem = None                                           
+    footerItem = None
+    filteredArray = []
+    
+    for item in sorted_array:                                                       # minY 기준으로 sort한 array를 하나씩 item으로 뽑아옴
+        class_name = item['class_name']
+        confidence = item['confidence']
+        
+        if class_name == 'header':                                                  # header일때 headerItem에  값을 추가
+            if headerItem is None or confidence > headerItem['confidence']:
+                headerItem = item
+        elif class_name == 'footer':                                                # footer일때 footerItem에  값을 추가
+            if footerItem is None or confidence > footerItem['confidence']:
+                footerItem = item
+        else:
+            filteredArray.append(item)                                              # block일때 array에 item을 계속 넣어
+    
+    if headerItem is not None:
+        # filteredArray = [x for x in filteredArray if x['class_name'] != 'header']
+        filteredArray.append(headerItem)
+    if footerItem is not None:
+        # filteredArray = [x for x in filteredArray if x['class_name'] != 'footer']
+        filteredArray.append(footerItem)
+    
+    # 최종 필터링 및 정렬
+    resultArray = sorted(filteredArray, key=lambda x: x['minY'])
+    
+    return resultArray
+
+def getData( box, names, imgWidth, imgHeight ):
+
+    boxData = {}
+    # box.xyxy[0]
+            
+    boxResult = box.xywhn.tolist()[0]
+    classNum = int(box.cls.tolist()[0])
+    className = names[classNum]
+    conf = box.conf.tolist()[0]
+    centerX = boxResult[0]
+    centerY = boxResult[1]
+    width = boxResult[2]
+    height = boxResult[3]
+
+    left = centerX - ( width / 2 )
+    top = centerY - ( height / 2 )
+
+    minX = left
+    minY = top
+    maxX = left + width
+    maxY = top + height
+
+    boxData['class_name'] = className
+    boxData['class_id'] = classNum
+    boxData['confidence'] = conf
+    boxData['center_x'] = centerX
+    boxData['center_y'] = centerY
+    boxData['left'] = left
+    boxData['top'] = top
+    boxData['width'] = width
+    boxData['height'] = height
+    boxData['minX'] = minX
+    boxData['minY'] = minY
+    boxData['maxX'] = maxX
+    boxData['maxY'] = maxY
+
+
+    boxData['origin_center_x'] = centerX * imgWidth
+    boxData['origin_center_y'] = centerY * imgHeight
+    boxData['origin_left'] = left * imgWidth
+    boxData['origin_top'] = top * imgHeight
+    boxData['origin_width'] = width * imgWidth
+    boxData['origin_height'] = height * imgHeight
+    boxData['origin_minX'] = minX * imgWidth
+    boxData['origin_minY'] = minY * imgHeight
+    boxData['origin_maxX'] = maxX * imgWidth
+    boxData['origin_maxY'] = maxY * imgHeight
+
+    return boxData
+
+def getModelResult( results, path=None ):           
     ROOT_PATH = os.getcwd() + "\\";
-    data = {}
+    data = {}                                   # 딕셔너리 형태로 data를 정리하기 위해
     dataList = []
-    for result in results:
-        boxes = result.boxes  # Boxes object for bbox outputs
-        names = result.names
-        origImg = result.orig_shape
+    img = None
+    if( path ):
+        img = Image.open(path)                  # Path에 있는 image를 오픈
+
+    for result in results:          
+        boxes = result.boxes                    # 결과값을 box label을 불러옴
+        names = result.names                    # 결과값의 class 이름을 불러옴
+        origImg = result.orig_shape             # original image의 width, height등 크기나 자료정보
         imgWidth = origImg[1]
         imgHeight = origImg[0]
 
-        data['img_width'] = imgWidth
+        data['img_width'] = imgWidth            # data 딕셔너리에 입력 키와 쌍 값으로
         data['img_height'] = imgHeight
         print( origImg )
         # masks = result.masks  # Masks object for segmenation masks outputs
@@ -74,64 +164,53 @@ def getModelResult( results ):
     #     # print(boxes.cls)
     #     # print(masks)
     #     # print(probs)
-        boxList = []
-        for box in boxes:
-
-            boxData = {}
-            # box.xyxy[0]
-            
-            boxResult = box.xywhn.tolist()[0]
-            classNum = int(box.cls.tolist()[0])
-            className = names[classNum]
-            conf = box.conf.tolist()[0]
-            centerX = boxResult[0]
-            centerY = boxResult[1]
-            width = boxResult[2]
-            height = boxResult[3]
-
-            left = centerX - ( width / 2 )
-            top = centerY - ( height / 2 )
-
-            minX = left
-            minY = top
-            maxX = left + width
-            maxY = top + height
-
-            boxData['class_name'] = className
-            boxData['class_id'] = classNum
-            boxData['confidence'] = conf
-            boxData['center_x'] = centerX
-            boxData['center_y'] = centerY
-            boxData['left'] = left
-            boxData['top'] = top
-            boxData['width'] = width
-            boxData['height'] = height
-            boxData['minX'] = minX
-            boxData['minY'] = minY
-            boxData['maxX'] = maxX
-            boxData['maxY'] = maxY
-
-
-            boxData['origin_center_x'] = centerX * imgWidth
-            boxData['origin_center_y'] = centerY * imgHeight
-            boxData['origin_left'] = left * imgWidth
-            boxData['origin_top'] = top * imgHeight
-            boxData['origin_width'] = width * imgWidth
-            boxData['origin_height'] = height * imgHeight
-            boxData['origin_minX'] = minX * imgWidth
-            boxData['origin_minY'] = minY * imgHeight
-            boxData['origin_maxX'] = maxX * imgWidth
-            boxData['origin_maxY'] = maxY * imgHeight
-
-
+        boxList = []                            # boxlist 초기화
+        for box in boxes:                       # box들을 하나씩 뽑아!!
+            boxData = getData( box, names, imgWidth, imgHeight )
             # if( boxData['confidence'] * 100 > 60 ):
             boxList.append( boxData )
         
-        dataList.append( boxList )
+        if( path ):
+
+            boxList = getFilterAndSortDataList( boxList )               # 자른 이미지들을 각각의 모델로 전송
+
+            resultList = []
+            i=0
+            for boxData in boxList:
+                if( img ):
+                    pixels = imageToPixels( img, (boxData['origin_minX'], boxData['origin_minY'], boxData['origin_maxX'], boxData['origin_maxY']))
+                    step2Data = step2Classification( pixels, boxData['class_name'] )
+                    step3Data = step3Detect( img, (boxData['origin_minX'], boxData['origin_minY'], boxData['origin_maxX'], boxData['origin_maxY']), boxData['class_name'] )
+                    
+                    boxData['step2'] = step2Data
+                    boxData['step3'] = step3Data
+                    resultList.append(boxData);
+                    i = i+1
+            os.remove( path )
+
+        else:
+            resultList = boxList
+        dataList.append( resultList )
+    
+    
+
     data['data'] = dataList
     # jsonStr = json.dumps( dataList )
     # print( jsonStr )
     return data
+
+def imageToPixels( image, cropArea, isResize=True ):
+    # 이미지 불러오기
+    # 이미지 크롭하기
+    test_image = image.crop(cropArea)
+
+    if isResize :
+        test_image = tf.image.resize(test_image, size=(224,224))
+    test_image = tf.expand_dims(test_image, axis=0)
+    # 이미지를 numpy 배열로 변환하기
+    pixel_array = np.array(test_image)
+
+    return pixel_array
 
 def imageUrlToPixels( source ):
     res = urlopen( source ).read()
@@ -160,9 +239,48 @@ def getapi():
     image = Image.fromarray(image_bytes)
     image.save('prediction.png')
     return FileResponse('prediction.png')
-    
+
+def downloadImage( url: str ):
+
+    parsed_url = urlparse(url)
+    filename = os.path.basename(parsed_url.path)
+
+    ROOT_PATH = os.getcwd() + "/";
+    print( ROOT_PATH );
+
+    image_path = ROOT_PATH + "app/ai/" + filename
+
+    print( image_path )
+
+    response = requests.get(url, stream=True)
+    if response.status_code == 200:
+        with open(image_path, 'wb') as out_file:
+            out_file.write(response.content)
+            print("Image successfully downloaded: ", image_path)
+        return image_path
+    else:
+        print("Unable to download image. HTTP Response Code: ", response.status_code)
+        return None
+
+def tfservingPredict( endpoint, pixels ):
+    # endpoint = 'http://tfserving:8501/v1/models/block:predict'
+    header = {"content-type": "application/json"} 
+    batch_json = json.dumps({"instances": pixels.tolist()})
+
+    json_res = requests.post(url=endpoint, data=batch_json, headers=header)
+    server_preds = json.loads(json_res.text)
+
+    return server_preds['predictions']    
+
+@app.post('/models/detect')
+async def postapi(source: str):
+    path = downloadImage( source )
+    results = model(path)
+    data = getModelResult( results, path )
+    return data
+
 @app.post('/models/step1')
-def postapi(source: str):
+def step1_yolo(source: str):
 
     ROOT_PATH = os.getcwd() + "\\";
 
@@ -172,10 +290,12 @@ def postapi(source: str):
     results = model(source)
     
     data = getModelResult( results )
-    return data
+    height_data = height_calculrator(results)   # height_calculrator에 가서 [[classNum, height, imgHeight], [classNum, height, imgHeight]] 이중 리스트 형태로 값반환
+    img_height = height_check(height_data)
+    return data, img_height
 
 @app.post('/models/step3')
-def postapi(source: str):
+def step3_yolo(source: str):
 
     ROOT_PATH = os.getcwd() + "\\";
 
@@ -183,9 +303,11 @@ def postapi(source: str):
     # model3 = YOLO('/code/app/step3_last.pt')  # load a pretrained YOLOv8n detection model
     # model = YOLO('/code/app/best.pt')  # load a pretrained YOLOv8n detection model
     results = model3(source)
-    
+    result = Text_image_position(results)
+    data = block_width_box(results)
+    block_size = block_width_calculate(data)
     data = getModelResult( results )
-    return data
+    return data, block_size, result
 
 
 @app.get("/predict/{source_url:path}")
@@ -213,56 +335,21 @@ def step2_block(source: str):
     print( 'image path ==> ' + source )
     pixels = imageUrlToPixels( source )
     endpoint = 'http://tfserving:8501/v1/models/block:predict'
-    header = {"content-type": "application/json"} 
-    batch_json = json.dumps({"instances": pixels.tolist()})
-
-    json_res = requests.post(url=endpoint, data=batch_json, headers=header)
-    server_preds = json.loads(json_res.text)
-
-    return server_preds['predictions']
+    return tfservingPredict( endpoint, pixels )
 
 @app.post("/models/step2/header")
-def step2_footer(source: str):
+def step2_header(source: str):
     print( 'image path ==> ' + source )
     pixels = imageUrlToPixels( source )
     endpoint = 'http://tfserving:8501/v1/models/header:predict'
-    header = {"content-type": "application/json"} 
-    batch_json = json.dumps({"instances": pixels.tolist()})
-
-    json_res = requests.post(url=endpoint, data=batch_json, headers=header)
-    server_preds = json.loads(json_res.text)
-    return server_preds['predictions']
-
-
-
-@app.get("/models/step2/header2")
-def step2_headerTest(source: str):
-    print( 'aaa' )
-    # source = "/code/app/giordano.jpeg"
-    print( 'image path ==> ' + source )
-    pixels = imageUrlToPixels( source )
-    endpoint = 'http://tfserving:8501/v1/models/header:predict'
-    header = {"content-type": "application/json"} 
-    batch_json = json.dumps({"instances": pixels.tolist()})
-
-    json_res = requests.post(url=endpoint, data=batch_json, headers=header)
-    server_preds = json.loads(json_res.text)
-    return server_preds['predictions']
-
-
-
+    return tfservingPredict( endpoint, pixels )
 
 @app.post("/models/step2/footer")
 def step2_footer(source: str):
     print( 'image path ==> ' + source )
     pixels = imageUrlToPixels( source )
     endpoint = 'http://tfserving:8501/v1/models/footer:predict'
-    header = {"content-type": "application/json"} 
-    batch_json = json.dumps({"instances": pixels.tolist()})
-
-    json_res = requests.post(url=endpoint, data=batch_json, headers=header)
-    server_preds = json.loads(json_res.text)
-    return server_preds['predictions']
+    return tfservingPredict( endpoint, pixels )
 
 
 @app.get("/predict/image_url/")
@@ -315,6 +402,43 @@ async def predict_image_json(file: UploadFile):
     
     return predict_image_url_json(uploaded_image_path)
 
+
+
+def step2_header_file(pixels, path):
+    filename = os.path.basename(path)
+    print( filename )
+    # pixels = np.random.rand(100, 100, 3) * 255
+
+    # # NumPy 배열을 PIL 이미지로 변환
+    # im = Image.fromarray(pixels.astype('uint8'))
+
+    # # 이미지 저장
+    # im.save("output.png")
+    
+    endpoint = 'http://tfserving:8501/v1/models/header:predict'
+    return tfservingPredict( endpoint, pixels )
+
+
+def step2Classification(pixels, type):
+    if type == 'header':
+        endpoint = 'http://tfserving:8501/v1/models/header:predict'
+    elif type == 'footer':
+        endpoint = 'http://tfserving:8501/v1/models/footer:predict'
+    else:
+        endpoint = 'http://tfserving:8501/v1/models/block:predict'
+    return tfservingPredict( endpoint, pixels )
+
+def step3Detect(image, cropArea, type):
+    im = image.crop(cropArea)
+    a = '';
+    if type == 'header':
+        a = 'header'
+    elif type == 'footer':
+        b = 'footer'
+
+    results = model3( im )
+    data = getModelResult( results )
+    return data
 
 @app.get('/getColor')
 def color(source: str):
@@ -506,31 +630,93 @@ def mostColorGroup(source: str):
 
     return data
 
+def height_calculrator(results):                                            # height_data = height_calculrator(results)   # height_calculrator에 가서 [[classNum, height, imgHeight], [classNum, height, imgHeight]] 이중 리스트 형태로 값반환
+    for result in results:                                                  # img_height = height_check(height_data)
+        boxes = result.boxes  # Boxes object for bbox outputs               # return img_height
+        origImg = result.orig_shape
+        imgHeight = origImg[0]
 
-target_classes = ['typo_text','image_photo', 'image_colorBG', 'image_removeBG'] # 바운딩 박스를 추출하고자 하는 클래스명들의 리스트
-def extract_boxes_by_class(boxList, target_classes):                            #boxList: getModelResult 함수로부터 반환된 data의 'data' 키에 해당하는 값
+        data = []
+        for box in boxes:
 
-    target_boxes = []                                                           #target들을 넣을 박스 리스트       
-    for box in boxList:                                                         #boxlist에서  클래스 찾아내기
-        class_name = box['class_name']
-        if class_name in target_classes:
-            target_boxes.append(box)                                            #찾아냈으면 리스트에 넣기
-    return target_boxes
+            classNum = int(box.cls.tolist()[0])
 
+            boxData = [classNum, imgHeight]
+            data.append(boxData)
 
+    return data
 
-def get_text_and_image_boxes(results):                                          # image, text_box label을 가져오기 위함
-    data = getModelResult(results)
-    boxList = data['data']
-                                                                                # 텍스트(0번 클래스)와 이미지(6, 7, 8번 클래스)에 해당하는 바운딩 박스 리스트 추출
-    text_boxes = extract_boxes_by_class(boxList, ['typo_text'])
-    image_boxes = extract_boxes_by_class(boxList, ['image_photo', 'image_colorBG', 'image_removeBG'])
+def height_check(data):
+    datalist = []
+    for dataslice in data:
+        classNum = dataslice[0]
+        if 1 <= classNum <= 10:
+            datalist.append(dataslice)
+    return datalist
+
+def Text_image_position(data):                                                  # result = Text_image_position(results)     
+    boxlist = classbox(data)
+    text_boxes, image_boxes = classboxclassification(boxlist)                   # return result
+    text_boxes = process_boxes(text_boxes)
+    image_boxes = process_boxes(image_boxes)
+    result = check_text_position(image_boxes, text_boxes)
+    return result
+
+def classbox(results):
+    dataList = []
+    for result in results:
+        boxes = result.boxes  # Boxes object for bbox outputs
+        names = result.names
+        origImg = result.orig_shape
+        imgWidth = origImg[1]
+        imgHeight = origImg[0]
+
+        data = []
+        for box in boxes:
+            boxResult = box.xywhn.tolist()[0]
+            classNum = int(box.cls.tolist()[0])
+            className = names[classNum]
+            conf = box.conf.tolist()[0]
+            centerX = boxResult[0]
+            centerY = boxResult[1]
+            width = boxResult[2]
+            height = boxResult[3]
+
+            left = centerX - (width / 2)
+            top = centerY - (height / 2)
+
+            minX = left
+            minY = top
+            maxX = left + width
+            maxY = top + height
+
+            boxData = [classNum, minX, minY, maxX, maxY]
+            data.append(boxData)
+
+        dataList.append(data)
+
+    return dataList
+
+def classboxclassification(dataList):
+    boxes_list = classbox(dataList)
+    image_boxes = []
+    text_boxes = []
+    for results in boxes_list:
+        for result in results:
+            if result[0] == 6:
+                image_boxes.append(result[1:])
+                if image_boxes is None:
+                    return False
+            elif result[0] == 0 or 1:
+                text_boxes.append(result[1:])
+                if text_boxes is None:
+                    return False
 
     return text_boxes, image_boxes
 
 
+
 def is_box_inside_image(text_boxes, image_boxes):                               # image label안에 text label이 있는지 체크
-    
 
     for text_box in text_boxes:                                                 
         text_x_min, text_y_min, text_x_max, text_y_max = text_box 
@@ -575,16 +761,108 @@ def text_on_bottom_image(image_boxes, text_boxes):                              
                 return True
     
     return False
-                                                                                # 어느방향에 있는지 한번에 체크
-def check_text_position(image_boxes, text_boxes):                               
-    if is_box_inside_image(image_boxes, text_boxes):
-        return "Image Inside Text"
-    elif text_on_right_image(image_boxes, text_boxes):
+                                                                               
+def check_text_position(image_boxes, text_boxes):                    # 어느방향에 있는지 한번에 체크                
+    if text_on_right_image(image_boxes, text_boxes):
         return "Image Right Text"
     elif text_on_left_image(image_boxes, text_boxes):
         return "Image Left Text"
     elif text_on_bottom_image(image_boxes, text_boxes):
         return "Image Bottom Text"
+    elif is_box_inside_image(image_boxes, text_boxes):
+        return "Image Inside Text"
     else:
         return "Image and Texts are not related"
     
+def process_boxes(boxes_list):
+    processed_boxes = []
+    for boxes in boxes_list:
+        processed_boxes.append(tuple(boxes))
+    return processed_boxes
+
+def block_width_box(results):
+    for result in results:
+        boxes = result.boxes  
+        data = []
+        for box in boxes:
+            
+            boxResult = box.xywhn.tolist()[0]
+            classNum = int(box.cls.tolist()[0])
+            width = boxResult[2]
+            centerX = boxResult[0]
+            left = centerX - (width / 2)
+            minX = left
+            maxX = left + width
+            boxData = [classNum, minX, maxX]
+            data.append(boxData)
+
+    return data
+
+def block_width_calculate(data):        #   data = block_width_box(results)
+                                        #   block_size = block_width_calculate(data)
+    position_check_list_min = []        #   return block_size
+    position_check_list_max = []
+    right_x = 0
+    left_x = 0
+    result = 0
+    if len(data) > 1:
+        for block in data:
+            if block[0] == 6 or 7 or 8 or 9:
+                position_check_list_min.append(block[1])
+                position_check_list_max.append(block[2])
+        
+        right_x = 1 - max(position_check_list_max)
+        left_x = 0 + min(position_check_list_min)
+    else:
+        if data[0] not in 6 or 7 or 8 or 9:
+            return False
+        else:
+            right_x = 1 - block[2]
+            left_x = 0 + block[1]
+    
+    result = min(right_x, left_x)
+    if result > 0.2:
+        block_size = 'S'
+    elif 0.2 >= result >= 0.05:
+        block_size = 'M'
+    elif 0.05 > result:
+        block_size = 'L'
+        
+    return block_size
+
+def Image_check_logic(data):                #classbox() 랑 같이 사용해야함. classobox dataformat에 맞춰놓음
+
+    for i in data:
+        for j in classdict.keys():
+            if i[0] == int(j):  
+                classdict[j] += 1
+
+    max_count = 0
+    classresult = None
+
+    for j, count in classdict.items(): 
+        if count > max_count:
+            max_count = count
+
+            classresult = j
+
+    return classresult
+
+def N_block(imagedata):                                                                         # 섹션절단후 잘린 이미지 투입
+    pytesseract.pytesseract.tesseract_cmd = r'C:/Program Files/Tesseract-OCR/tesseract.exe'     # 추후 서버에 설치 후 경로 지정 등 해야함
+    path = ''                                                                                   # imagedata경로 지정
+    image = cv2.imread(path)
+    rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+    text = pytesseract.image_to_string(rgb_image, lang='kor+eng')
+    for i in text:                          #ex)이럴때 조건탐지
+        if i ==',':
+            print(i)
+        elif i == '$':
+            print(i)
+        elif i == '₩':
+            print(i)
+        elif i == '원':
+            print(i)
+    
+    return '가격이 있는 상품 리스트 호출'
